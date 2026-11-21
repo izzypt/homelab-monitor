@@ -56,7 +56,7 @@ services:
       timeout: 5s
       retries: 5
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}  # required, from .env
     mem_limit: 64m
     networks: [data]
 
