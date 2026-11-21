@@ -9,7 +9,19 @@ A self-hosted monitor for a single-machine homelab (a headless Mac mini). It ans
 
 Built with **FastAPI**, **Celery**, **Redis**, **PostgreSQL** and an **Angular** (Angular Material) frontend, run with Docker Compose on Colima, and published through an existing Cloudflare Tunnel.
 
-> **Status:** design approved, implementation not started. This README is the system design document; sections will gain setup and usage instructions as code lands.
+> **Status:** in development. Foundation in place (compose stack, FastAPI skeleton, Celery, Alembic, CI); features land in follow-up PRs. The sections below are the system design document.
+
+## Getting started
+
+Requirements: Docker with Compose (Colima on the Mac mini), and [uv](https://docs.astral.sh/uv/) for running backend checks locally.
+
+```bash
+cp .env.example .env      # then set POSTGRES_PASSWORD and REDIS_PASSWORD
+make up                   # build and start postgres, redis, migrate, api, workers, beat
+make ps                   # check service health
+make dev                  # or: hot-reload API on http://127.0.0.1:8000/api/docs
+make lint test audit      # backend lint, tests and dependency audit
+```
 
 ---
 
