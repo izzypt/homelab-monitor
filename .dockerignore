@@ -1,0 +1,8 @@
+# Build context for the web image (frontend/Dockerfile). The API image uses ./backend.
+*
+!frontend
+!deploy/nginx
+frontend/node_modules
+frontend/dist
+frontend/.angular
+frontend/src/app/api

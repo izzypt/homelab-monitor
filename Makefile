@@ -1,7 +1,7 @@
 COMPOSE      := docker compose
 COMPOSE_DEV  := docker compose -f docker-compose.yml -f compose.dev.yml
 
-.PHONY: help up down dev logs ps migrate test lint format audit
+.PHONY: help up down dev logs ps migrate deploy rollback test web-test web-lint openapi lint format audit
 
 help:  ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -24,8 +24,28 @@ ps:  ## Show service status
 migrate:  ## Run database migrations
 	$(COMPOSE) run --rm migrate
 
-test:  ## Run backend tests
+# Deploy images built by CI (README section 11). `up` runs `migrate` before api/workers start.
+deploy:  ## Deploy CI images: make deploy TAG=<git-sha>
+	@test -n "$(TAG)" || { echo "usage: make deploy TAG=<git-sha>"; exit 1; }
+	IMAGE_TAG=$(TAG) $(COMPOSE) pull
+	IMAGE_TAG=$(TAG) $(COMPOSE) up -d --no-build --wait
+	@echo "$$(date -u +%FT%TZ) $(TAG)" >> .deploy-history
+	@echo "Deployed $(TAG). Earlier deploys are listed in .deploy-history"
+
+rollback:  ## Roll back: make rollback TAG=<previous-sha> (see .deploy-history)
+	@$(MAKE) --no-print-directory deploy TAG=$(TAG)
+
+test:  ## Run backend and agent tests
 	cd backend && uv run pytest -q . ../agent/tests
+
+web-test:  ## Run frontend unit tests
+	cd frontend && npm test
+
+web-lint:  ## Check frontend formatting and that it builds
+	cd frontend && npm run format:check && npm run build
+
+openapi:  ## Regenerate frontend/openapi.json after changing the API
+	cd backend && uv run python -m app.openapi_export ../frontend/openapi.json
 
 lint:  ## Lint and check formatting
 	cd backend && uv run ruff check . ../agent && uv run ruff format --check . ../agent

@@ -9,27 +9,42 @@ A self-hosted monitor for a single-machine homelab (a headless Mac mini). It ans
 
 Built with **FastAPI**, **Celery**, **Redis**, **PostgreSQL** and an **Angular** (Angular Material) frontend, run with Docker Compose on Colima, and published through an existing Cloudflare Tunnel.
 
-> **Status:** in development. Done: compose stack, data model, login, URL monitors (http/dns/tcp), scheduler, incidents, email alerts, TLS expiry, macOS host agent ([agent/README.md](agent/README.md)), containers via a read-only Docker proxy, local network outage grouping, daily rollups and retention pruning. Next: Angular frontend and image builds. The sections below are the system design document.
+> **Status:** in development. Done: compose stack, data model, login, URL monitors (http/dns/tcp), scheduler, incidents, email alerts, TLS expiry, macOS host agent ([agent/README.md](agent/README.md)), containers via a read-only Docker proxy, local network outage grouping, daily rollups and retention pruning, Angular dashboard behind nginx, GHCR image builds and `make deploy`. The sections below are the system design document.
 
 ## Getting started
 
-Requirements: Docker with Compose (Colima on the Mac mini), and [uv](https://docs.astral.sh/uv/) for running backend checks locally.
+Requirements: Docker with Compose (Colima on the Mac mini). For local development also [uv](https://docs.astral.sh/uv/) (backend) and Node.js 24 (frontend).
+
+### Run it on the Mac mini
 
 ```bash
-cp .env.example .env      # then set POSTGRES_PASSWORD and REDIS_PASSWORD
-make up                   # build and start postgres, redis, migrate, api, workers, beat
+cp .env.example .env      # then set POSTGRES_PASSWORD, REDIS_PASSWORD and the rest
+make deploy TAG=<git-sha> # pull the CI images for that commit, migrate, start everything
 make ps                   # check service health
-make dev                  # or: hot-reload API on http://127.0.0.1:8000/api/docs
-make lint test audit      # backend lint, tests and dependency audit
 ```
 
-Create the admin account (there is no signup page):
+The dashboard is then on <http://127.0.0.1:8380> (`WEB_PORT`); point the Cloudflare Tunnel at that address. Image SHAs are on the repository's Packages page, or use `TAG=main` for the latest build. If the GHCR packages are private, run `docker login ghcr.io` once with a token that has `read:packages`, or make both packages public in their settings.
+
+Create the admin account (there is no signup page), then register the host and install the agent ([agent/README.md](agent/README.md)):
 
 ```bash
 docker compose run --rm api python -m app.cli create-admin --email you@example.com
 ```
 
-Backend tests need PostgreSQL 16 and Redis; set `POSTGRES_*` and `REDIS_*` to point at them (CI uses service containers).
+Register the host on the dashboard's **Hosts** page with the name in `DOCKER_HOST_NAME` (default `mac-mini`), so containers are recorded under it.
+
+### Develop locally
+
+```bash
+make up                   # build the images locally and start the whole stack on :8380
+make dev                  # or: hot-reload API on http://127.0.0.1:8000/api/docs
+cd frontend && npm start  # Angular dev server on :4200, proxying /api to :8000
+make lint test audit      # backend lint, tests and dependency audit
+make web-lint web-test    # frontend format check, build and unit tests
+make openapi              # after an API change: refresh frontend/openapi.json
+```
+
+Backend tests need PostgreSQL 16 and Redis; set `POSTGRES_*` and `REDIS_*` to point at them (CI uses service containers). The Angular API client is generated from `frontend/openapi.json` by `npm run generate` (run automatically before build, test and start); CI fails if the committed spec is stale.
 
 ---
 
@@ -206,7 +221,7 @@ flowchart LR
 2. **Single entry point (nginx).** SPA and API share one origin: no CORS, HttpOnly session cookies instead of browser-stored tokens.
 3. **Alert on state transitions with confirmation.** DOWN after 2 consecutive failures, UP after 1 success; one email per incident and one on recovery.
 4. **Docker socket behind a read-only proxy.** The raw socket is root on the VM; the proxy limits it to listing containers.
-5. **Generated API client.** The Angular client is generated from FastAPI's OpenAPI spec so frontend and backend can't drift.
+5. **Generated API client.** The Angular client is generated from FastAPI's OpenAPI spec (`ng-openapi-gen`), and CI checks the committed spec, so frontend and backend can't drift.
 6. **Two external dead-man's switches.** Distinguish "the Mac is down" from "Colima/the app is down" (§9).
 
 ### Technology
@@ -403,7 +418,7 @@ Conventions:
 
 **Threat model.** The dashboard is on the public internet. Main risks: login brute force, information disclosure about the home network, theft of the agent token to forge heartbeats, and abuse of the Docker socket to take over the VM.
 
-- **Edge:** Cloudflare provides TLS and DDoS protection (Cloudflare Access planned). nginx sets CSP, HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and body-size limits, and serves only `/` and `/api`.
+- **Edge:** Cloudflare provides TLS and DDoS protection (Cloudflare Access planned). nginx sets CSP, HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and body-size limits, and serves only `/` and `/api` (the OpenAPI docs are not published).
 - **Authentication:** no signup and no default credentials; the admin is created with `python -m app.cli create-admin`. Passwords hashed with argon2id. 256-bit random session IDs in Redis; cookie `HttpOnly; Secure; SameSite=Strict`; 7-day absolute and 24 h idle expiry; ID rotated on login; server-side logout. CSRF protection on state-changing requests. Login rate limited (5/min per IP via `CF-Connecting-IP`); failed and successful attempts logged; failures return the same generic error for unknown emails and wrong passwords.
 - **Agent:** per-host 32-byte random token, stored as SHA-256, shown once, rotatable. The agent talks to `127.0.0.1` only, so the token never crosses the internet. Strict schema validation, size and rate limits on the ingest endpoint. Runs as a dedicated non-admin user.
 - **Containers:** non-root users, `no-new-privileges`, `cap_drop: ALL`, read-only root filesystem where possible. Only `web` publishes a port, on `127.0.0.1`. Postgres and Redis on internal networks; Redis requires a password. The Docker socket proxy permits only `GET /containers/*` and sits on a network reachable only by `worker-default`.
@@ -437,9 +452,11 @@ Makefile
 ```bash
 ssh macmini
 cd homelab-monitor
-make deploy TAG=<git-sha>     # compose pull + migrate + up -d
-make rollback TAG=<prev-sha>  # same command, previous tag
+make deploy TAG=<git-sha>     # compose pull + migrate + up -d --wait
+make rollback TAG=<prev-sha>  # same command, previous tag (see .deploy-history)
 ```
+
+Migrations are forward-only, so a rollback keeps the newer schema; keep migrations additive so the previous image still runs against it.
 
 There is no auto-deploy: a self-hosted runner on the Mac would execute code from a public repository.
 
@@ -460,7 +477,7 @@ All configuration via environment variables (`.env`, loaded with pydantic-settin
 
 ### Local development
 
-`docker-compose.override.yml` enables API hot reload; `ng serve` proxies `/api` to the local API.
+`compose.dev.yml` (`make dev`) enables API hot reload on `127.0.0.1:8000`; `npm start` in `frontend/` serves the Angular app and proxies `/api` to it.
 
 ## 12. Decision log and future work
 

@@ -53,10 +53,38 @@ jobs:
           POSTGRES_USER: homelab_monitor
           POSTGRES_PASSWORD: test
         run: uv run alembic upgrade head && uv run alembic check
+      - name: OpenAPI spec up to date (the Angular client is generated from it)
+        run: |
+          uv run python -m app.openapi_export ../frontend/openapi.json
+          git diff --exit-code ../frontend/openapi.json || {
+            echo "::error::frontend/openapi.json is stale: run 'make openapi' and commit it"; exit 1; }
       - name: Audit dependencies
         run: |
           uv export --frozen --no-dev --no-hashes -o "$RUNNER_TEMP/requirements.txt"
           uv run pip-audit -r "$RUNNER_TEMP/requirements.txt"
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci --no-fund
+      - name: Format
+        run: npm run format:check
+      - name: Unit tests
+        run: npm test
+      - name: Build
+        run: npm run build
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
   compose:
     runs-on: ubuntu-24.04
@@ -67,5 +95,48 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
           docker compose -f docker-compose.yml -f compose.dev.yml config --quiet
-      - name: Build image
-        run: docker build backend
+      - name: Build images
+        run: |
+          docker build backend
+          docker build -f frontend/Dockerfile .
+
+  # On main only: build linux/arm64 images on native arm64 runners and push them to GHCR,
+  # tagged with the commit SHA and `main` (README section 11). Deploys stay manual.
+  images:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [backend, frontend, compose]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - name: api
+            context: backend
+            file: backend/Dockerfile
+          - name: web
+            context: .
+            file: frontend/Dockerfile
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/homelab-monitor-${{ matrix.name }}:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/homelab-monitor-${{ matrix.name }}:main
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

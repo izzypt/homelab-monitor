@@ -18,6 +18,8 @@ from app.models import Alert, CheckResult, Incident, Monitor
 log = logging.getLogger(__name__)
 
 MAX_CATCH_UP_JITTER_S = 10
+# Set by the check_network task while the local network is down (per-monitor emails suppressed).
+NETWORK_OUTAGE_KEY = "network:outage"
 
 
 @dataclass(frozen=True)

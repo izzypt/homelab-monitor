@@ -18,7 +18,7 @@ from app.security import get_redis
 log = logging.getLogger(__name__)
 
 SCHEDULER_LOCK = "lock:schedule_due_checks"
-NETWORK_OUTAGE_KEY = "network:outage"
+NETWORK_OUTAGE_KEY = monitoring.NETWORK_OUTAGE_KEY
 NETWORK_FAILURES_KEY = "network:failures"
 NETWORK_FAILURE_THRESHOLD = 2
 
