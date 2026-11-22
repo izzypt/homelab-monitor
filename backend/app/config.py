@@ -47,6 +47,22 @@ class Settings(BaseSettings):
     def alert_recipient_list(self) -> list[str]:
         return [a.strip() for a in self.alert_recipients.split(",") if a.strip()]
 
+    # Containers: the Docker API through the read-only socket proxy, recorded under this host.
+    docker_api_url: str = "http://docker-proxy:2375"
+    docker_host_name: str = "mac-mini"
+
+    # Local network outage detection: if every control target fails twice in a row, monitor
+    # DOWN emails are replaced by a single "network outage" email.
+    network_control_urls: str = "https://1.1.1.1,https://www.google.com"
+
+    @property
+    def network_control_url_list(self) -> list[str]:
+        return [u.strip() for u in self.network_control_urls.split(",") if u.strip()]
+
+    # Retention (README section 6). Nothing is kept forever.
+    raw_retention_days: int = 30
+    summary_retention_days: int = 183
+
     # healthchecks.io ping URL for the "homelab-monitor" check (pinged by beat). Empty = disabled.
     healthcheck_ping_url: str = Field(default="", repr=False)
 

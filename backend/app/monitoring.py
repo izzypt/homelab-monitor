@@ -53,7 +53,13 @@ def claim_due_monitors(db: Session, now: datetime, limit: int = 500) -> list[Due
     return due
 
 
-def record_result(db: Session, monitor_id: int, outcome: CheckOutcome, now: datetime) -> list[int]:
+def record_result(
+    db: Session,
+    monitor_id: int,
+    outcome: CheckOutcome,
+    now: datetime,
+    suppress_alerts: bool = False,
+) -> list[int]:
     """Store a result, advance the monitor's state machine, and return new alert ids to send."""
     monitor = db.get(Monitor, monitor_id, with_for_update=True)
     if monitor is None:  # deleted while the check was in flight
@@ -79,7 +85,9 @@ def record_result(db: Session, monitor_id: int, outcome: CheckOutcome, now: date
             incident = _open_incident(db, monitor.id, "down")
             if incident is not None:
                 incident.ended_at = now
-                alert_ids += create_alert(db, "recovered", incident_id=incident.id)
+                # Only announce a recovery for an outage that was announced.
+                if _has_alert(db, incident.id, "down"):
+                    alert_ids += create_alert(db, "recovered", incident_id=incident.id)
         monitor.state = "UP"
     else:
         monitor.consecutive_failures += 1
@@ -90,10 +98,47 @@ def record_result(db: Session, monitor_id: int, outcome: CheckOutcome, now: date
             )
             db.add(incident)
             db.flush()
-            alert_ids += create_alert(db, "down", incident_id=incident.id)
+            if not suppress_alerts:
+                alert_ids += create_alert(db, "down", incident_id=incident.id)
 
     db.commit()
     return alert_ids
+
+
+def open_network_outage(db: Session, host_id: int, now: datetime, cause: str) -> list[int]:
+    if _open_host_incident(db, host_id, "network_outage") is not None:
+        return []
+    incident = Incident(host_id=host_id, kind="network_outage", started_at=now, cause=cause)
+    db.add(incident)
+    db.flush()
+    alert_ids = create_alert(db, "network_outage", incident_id=incident.id)
+    db.commit()
+    return alert_ids
+
+
+def close_network_outage(db: Session, host_id: int, now: datetime) -> list[int]:
+    incident = _open_host_incident(db, host_id, "network_outage")
+    if incident is None:
+        return []
+    incident.ended_at = now
+    alert_ids = create_alert(db, "recovered", incident_id=incident.id)
+    db.commit()
+    return alert_ids
+
+
+def _open_host_incident(db: Session, host_id: int, kind: str) -> Incident | None:
+    return db.scalar(
+        select(Incident).where(
+            Incident.host_id == host_id, Incident.kind == kind, Incident.ended_at.is_(None)
+        )
+    )
+
+
+def _has_alert(db: Session, incident_id: int, kind: str) -> bool:
+    return (
+        db.scalar(select(Alert.id).where(Alert.incident_id == incident_id, Alert.kind == kind))
+        is not None
+    )
 
 
 def record_tls_expiry(

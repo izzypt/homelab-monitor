@@ -40,6 +40,18 @@ celery_app.conf.update(
             "task": "app.tasks.monitoring.evaluate_hosts",
             "schedule": 60.0,
         },
+        "snapshot-containers": {
+            "task": "app.tasks.monitoring.snapshot_containers",
+            "schedule": 60.0,
+        },
+        "check-network": {
+            "task": "app.tasks.monitoring.check_network",
+            "schedule": 60.0,
+        },
+        "rollup-and-prune": {
+            "task": "app.tasks.monitoring.rollup_and_prune",
+            "schedule": crontab(hour=3, minute=0),
+        },
         "check-tls-expiry": {
             "task": "app.tasks.monitoring.check_tls_expiry",
             "schedule": crontab(hour=9, minute=0),
