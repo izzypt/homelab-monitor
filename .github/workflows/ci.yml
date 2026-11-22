@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check . && uv run ruff format --check .
+      - name: Test
+        run: uv run pytest -q
+      - name: Audit dependencies
+        run: |
+          uv export --frozen --no-dev --no-hashes -o "$RUNNER_TEMP/requirements.txt"
+          uv run pip-audit -r "$RUNNER_TEMP/requirements.txt"
+
+  compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f compose.dev.yml config --quiet
+      - name: Build image
+        run: docker build backend
