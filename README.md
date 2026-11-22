@@ -23,6 +23,14 @@ make dev                  # or: hot-reload API on http://127.0.0.1:8000/api/docs
 make lint test audit      # backend lint, tests and dependency audit
 ```
 
+Create the admin account (there is no signup page):
+
+```bash
+docker compose run --rm api python -m app.cli create-admin --email you@example.com
+```
+
+Backend tests need PostgreSQL 16 and Redis; set `POSTGRES_*` and `REDIS_*` to point at them (CI uses service containers).
+
 ---
 
 ## Table of contents
@@ -303,7 +311,7 @@ Conventions:
 **Threat model.** The dashboard is on the public internet. Main risks: login brute force, information disclosure about the home network, theft of the agent token to forge heartbeats, and abuse of the Docker socket to take over the VM.
 
 - **Edge:** Cloudflare provides TLS and DDoS protection (Cloudflare Access planned). nginx sets CSP, HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and body-size limits, and serves only `/` and `/api`.
-- **Authentication:** no signup and no default credentials; the admin is created with `python -m app.cli create-admin`. Passwords hashed with argon2id. 256-bit random session IDs in Redis; cookie `HttpOnly; Secure; SameSite=Strict`; 7-day absolute and 24 h idle expiry; ID rotated on login; server-side logout. CSRF protection on state-changing requests. Login rate limited (5/min per IP via `CF-Connecting-IP`) with progressive delay; attempts logged.
+- **Authentication:** no signup and no default credentials; the admin is created with `python -m app.cli create-admin`. Passwords hashed with argon2id. 256-bit random session IDs in Redis; cookie `HttpOnly; Secure; SameSite=Strict`; 7-day absolute and 24 h idle expiry; ID rotated on login; server-side logout. CSRF protection on state-changing requests. Login rate limited (5/min per IP via `CF-Connecting-IP`); failed and successful attempts logged; failures return the same generic error for unknown emails and wrong passwords.
 - **Agent:** per-host 32-byte random token, stored as SHA-256, shown once, rotatable. The agent talks to `127.0.0.1` only, so the token never crosses the internet. Strict schema validation, size and rate limits on the ingest endpoint. Runs as a dedicated non-admin user.
 - **Containers:** non-root users, `no-new-privileges`, `cap_drop: ALL`, read-only root filesystem where possible. Only `web` publishes a port, on `127.0.0.1`. Postgres and Redis on internal networks; Redis requires a password. The Docker socket proxy permits only `GET /containers/*` and sits on a network reachable only by `worker-default`.
 - **Secrets:** all secrets and personal settings (DB/Redis passwords, SMTP credentials, healthchecks.io URLs, alert recipients) live in `.env`, which is git-ignored; the repo ships `.env.example` only.
