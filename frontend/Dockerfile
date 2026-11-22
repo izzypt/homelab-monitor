@@ -2,7 +2,7 @@
 # Web image: nginx serving the Angular build (README section 4). Build context: repository root.
 
 # The build output is static files, so build on the native platform even when targeting arm64.
-FROM --platform=$BUILDPLATFORM node:24-alpine AS build
+FROM --platform=$BUILDPLATFORM node:26-alpine AS build
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
