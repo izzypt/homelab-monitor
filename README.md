@@ -114,36 +114,9 @@ The homelab is one Apple Silicon Mac mini running macOS, headless (SSH only), wi
 
 ## 4. Architecture
 
-```
-                         Internet
-                            │
-                   Cloudflare (TLS, DNS)
-                            │  Cloudflare Tunnel (macOS LaunchDaemon)
-┌───────────────────────────┼──────────────────────────────────────────────┐
-│ macOS host                ▼                                              │
-│                                                                          │
-│  host-agent ──POST /api/v1/agent/heartbeat──▶ 127.0.0.1:${WEB_PORT}      │
-│  (LaunchDaemon)                                    │                     │
-│     └──ping──▶ healthchecks.io ("mac-mini")        │                     │
-│                                                    │                     │
-│ ┌──────────────── Colima VM · docker compose ──────┼───────────────────┐ │
-│ │                                                  ▼                   │ │
-│ │                                       web (nginx + Angular build)    │ │
-│ │                                         │ /        → static SPA      │ │
-│ │                                         │ /api/*   → api             │ │
-│ │                                         ▼                            │ │
-│ │   migrate (one-shot) ──▶ postgres ◀── api (FastAPI)                  │ │
-│ │                              ▲          │                            │ │
-│ │                              │          ▼                            │ │
-│ │          worker-checks ──────┤        redis (broker, sessions, locks)│ │
-│ │          worker-default ─────┘          ▲                            │ │
-│ │              │      │                   │                            │ │
-│ │              │      └──▶ SMTP           beat ──ping──▶ healthchecks.io│ │
-│ │              ▼                               ("homelab-monitor")     │ │
-│ │        docker-proxy (read-only) ──▶ /var/run/docker.sock             │ │
-│ └──────────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+![homelab-monitor architecture: every component on the Mac mini, inside the Colima VM and on the internet, with the connections between them](docs/diagrams/architecture.svg)
+
+All diagrams in this document are generated from one source file, [`docs/diagrams/build.py`](docs/diagrams/build.py) (see [docs/diagrams/README.md](docs/diagrams/README.md)). Arrows point from the side that opens the connection. Dashed arrows are liveness pings to healthchecks.io.
 
 ### Components
 
@@ -154,11 +127,78 @@ The homelab is one Apple Silicon Mac mini running macOS, headless (SSH only), wi
 | **api** | compose | FastAPI: auth and sessions, dashboard and monitor endpoints, agent ingest. Stateless; internal network only. |
 | **worker-checks** | compose | Celery worker, `checks` queue, threads pool (concurrency 16) for I/O-bound monitor checks. |
 | **worker-default** | compose | Celery worker, `default` queue, prefork pool (concurrency 2): scheduling, host evaluation, container snapshots, alerts, rollups, pruning. |
-| **beat** | compose | Celery beat, exactly one replica; fixed schedule in code; pings healthchecks.io. |
+| **beat** | compose | Celery beat, exactly one replica; fixed schedule in code, including the minute-by-minute healthchecks.io ping that worker-default sends. |
 | **migrate** | compose | One-shot `alembic upgrade head` before api/workers start. |
 | **postgres** | compose | PostgreSQL 16, system of record. Named volume. |
 | **redis** | compose | Redis 7: Celery broker, login sessions, short-lived locks and status cache. Password-protected, internal only. |
 | **docker-proxy** | compose | Docker socket proxy allowing only `GET /containers/*`; reachable only by `worker-default`. |
+
+### Component cards
+
+One card per component: where it runs, what it is responsible for, and who it talks to (`→` it opens the connection, `←` it receives it).
+
+**Ingress: from the internet to the API**
+
+<p>
+<img src="docs/diagrams/components/cloudflared.svg" width="49%" alt="cloudflared: Cloudflare Tunnel connector running as a macOS LaunchDaemon, forwards the public hostname to nginx on 127.0.0.1:8380">
+<img src="docs/diagrams/components/web.svg" width="49%" alt="web: nginx serving the Angular SPA and proxying /api to FastAPI; the only published port">
+</p>
+
+**Application**
+
+<p>
+<img src="docs/diagrams/components/api.svg" width="49%" alt="api: stateless FastAPI REST API for auth, dashboard, monitors and agent ingest">
+<img src="docs/diagrams/components/migrate.svg" width="49%" alt="migrate: one-shot alembic upgrade head before the api and workers start">
+</p>
+
+**Background work (Celery)**
+
+<p>
+<img src="docs/diagrams/components/beat.svg" width="49%" alt="beat: the single Celery beat that enqueues every scheduled task">
+<img src="docs/diagrams/components/worker-checks.svg" width="49%" alt="worker-checks: Celery worker on the checks queue running http, dns and tcp checks">
+</p>
+<p>
+<img src="docs/diagrams/components/worker-default.svg" width="49%" alt="worker-default: Celery worker on the default queue for scheduling, host evaluation, containers, alerts and maintenance">
+<img src="docs/diagrams/components/docker-proxy.svg" width="49%" alt="docker-proxy: read-only gate in front of the Docker socket">
+</p>
+
+**Data stores**
+
+<p>
+<img src="docs/diagrams/components/postgres.svg" width="49%" alt="postgres: PostgreSQL 16, the system of record">
+<img src="docs/diagrams/components/redis.svg" width="49%" alt="redis: Celery broker, login sessions and short-lived locks">
+</p>
+
+**On the Mac, outside Colima, and outside the Mac**
+
+<p>
+<img src="docs/diagrams/components/host-agent.svg" width="49%" alt="host-agent: native macOS agent that sends heartbeats and buffers them locally">
+<img src="docs/diagrams/components/healthchecks.svg" width="49%" alt="healthchecks.io: external dead man's switch for the Mac and for the app">
+</p>
+<p>
+<img src="docs/diagrams/components/smtp.svg" width="49%" alt="SMTP relay: delivers the alert emails">
+</p>
+
+### Networks and start order
+
+Compose networks decide who can reach whom. `data` and `docker` are internal (no route out of the VM).
+
+| Network | Internal | Members | Why |
+|---------|----------|---------|-----|
+| `data` | yes | postgres, redis, api, migrate, beat, worker-checks, worker-default | Postgres and Redis are never reachable from outside. |
+| `egress` | no | api, migrate, beat, worker-checks, worker-default | Outbound only: checks, SMTP, healthchecks.io. Nothing publishes a port here. |
+| `docker` | yes | docker-proxy, worker-default | Only worker-default can ask for the container list. |
+
+`web` (nginx) joins with the frontend and is the only service that publishes a port (`127.0.0.1:${WEB_PORT}`).
+
+```mermaid
+flowchart LR
+    pg["postgres<br/>healthy"] --> mig["migrate<br/>completed"]
+    rd["redis<br/>healthy"] --> api & wc["worker-checks"] & wd["worker-default"] & beat
+    mig --> api & wc & wd & beat
+```
+
+`migrate` must finish (`service_completed_successfully`) and Redis must be healthy before the API, workers and beat start. On the Mac the boot order is: FileVault unlock → Colima LaunchDaemon → Docker restarts containers, while cloudflared and host-agent start as their own LaunchDaemons.
 
 ### Key design choices
 
@@ -183,15 +223,32 @@ The homelab is one Apple Silicon Mac mini running macOS, headless (SSH only), wi
 
 ## 5. Data flows
 
+The main flows are drawn as **animated SVGs** on the same map as §4: an orange dot is a request or task message, red is the failure / alert path, green is a success or reply, and the panel at the bottom narrates each step. GIF copies live in [`docs/diagrams/gif/`](docs/diagrams/gif/) for places that don't play SVG animation, and [docs/diagrams/README.md](docs/diagrams/README.md) explains how to regenerate them.
+
 ### 5.1 Monitor check
+
+![Animated flow: beat enqueues the scheduler, worker-default claims due monitors and enqueues run_check, worker-checks probes the target, records a failure, opens an incident and enqueues send_alert, worker-default sends the email](docs/diagrams/flows/monitor-check.svg)
 
 1. Every 15 s, `schedule_due_checks` selects monitors with `next_check_at <= now()` using `FOR UPDATE SKIP LOCKED`, advances `next_check_at`, and enqueues `run_check(monitor_id)` on the `checks` queue (with up to 10 s jitter on catch-up after downtime).
 2. `run_check` performs the check by type (`http`: status/keyword/latency/TLS expiry; `dns`: resolve and optionally match the record; `tcp`: connect to host:port) and stores a `check_results` row.
 3. The monitor's state machine updates: `PENDING → UP / DOWN`; DOWN requires `failure_threshold` (default 2) consecutive failures.
 4. On a transition, an incident is opened or closed and `send_alert` is enqueued.
-5. If most monitors fail in the same cycle **and** a control check against a known-good external target fails, a single "local network outage" incident is raised instead of one per monitor.
+5. Every 60 s `check_network` probes known-good control URLs. If all of them fail twice in a row, a single "local network outage" incident is raised and per-monitor DOWN emails are suppressed while it lasts, so you get one alert instead of N.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> PENDING: monitor created
+    PENDING --> UP: check ok
+    PENDING --> DOWN: failure_threshold failures
+    UP --> DOWN: failure_threshold consecutive failures<br/>open incident · "down" email
+    DOWN --> UP: one success<br/>close incident · "recovered" email
+    DOWN --> DOWN: still failing (no new email)
+```
 
 ### 5.2 Host heartbeat
+
+![Animated flow: the macOS agent collects host data, posts the heartbeat through nginx to the api, which stores it in Postgres, records boot events and enqueues alerts; the agent pings healthchecks.io and buffers to a local spool when the API is down](docs/diagrams/flows/heartbeat.svg)
 
 1. Every 30 s the agent POSTs `{collected_at, boot_time, uptime, load, memory, disk, daemons, agent_version}` to `http://127.0.0.1:${WEB_PORT}/api/v1/agent/heartbeat` with its Bearer token.
 2. The API stores the heartbeat and updates `hosts.last_seen_at` using **server receive time**.
@@ -200,11 +257,22 @@ The homelab is one Apple Silicon Mac mini running macOS, headless (SSH only), wi
 
 ### 5.3 Host evaluation
 
-Every 60 s, `evaluate_hosts` marks a host STALE if no heartbeat arrived for 90 s and opens an incident; the next heartbeat closes it. It also raises a disk alert when reported disk usage exceeds 90%.
+Every 60 s, `evaluate_hosts` marks a host STALE if no heartbeat arrived for 90 s and opens an incident; the next heartbeat closes it. Disk usage is checked on every heartbeat: above 90% opens a disk incident and sends one email, and it closes once usage drops below 85%.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> UNKNOWN: POST /hosts
+    UNKNOWN --> UP: first heartbeat
+    UP --> STALE: no heartbeat for 90 s<br/>open incident · "stale" email
+    STALE --> UP: next heartbeat<br/>close incident · "recovered" email
+```
 
 ### 5.4 Container snapshot
 
 Every 60 s, `snapshot_containers` lists all containers through the socket proxy, upserts the current-state table and records only **changes** (started, stopped, unhealthy, removed) as `container_events`. No email is sent for container changes.
+
+![Animated flow: beat enqueues snapshot_containers, worker-default asks docker-proxy, which reads the read-only Docker socket, and the changes are written to Postgres](docs/diagrams/flows/container-snapshot.svg)
 
 ### 5.5 Alerts
 
@@ -219,10 +287,18 @@ Every 60 s, `snapshot_containers` lists all containers through the socket proxy,
 
 | healthchecks.io check | Pinged by | Every | Meaning |
 |-----------------------|-----------|-------|---------|
-| `mac-mini` | host agent (macOS) | 1 min | macOS is running and online |
-| `homelab-monitor` | Celery beat (Colima) | 1 min | Colima, Docker and the app are running |
+| `mac-mini` | host agent (macOS) | 30 s (every heartbeat cycle) | macOS is running and online |
+| `homelab-monitor` | `ping_healthcheck`, scheduled by beat and run by worker-default (Colima) | 1 min | Colima, Docker and the app are running |
 
 healthchecks.io emails the operator when either stops arriving (after a grace period) and again when it resumes.
+
+![Animated flow: worker-default pings the homelab-monitor check every minute and the agent pings the mac-mini check every 30 seconds; which ping goes quiet tells a Colima outage apart from a Mac outage](docs/diagrams/flows/dead-mans-switch.svg)
+
+### 5.8 Dashboard request
+
+How a page load reaches the API from the internet, and why nothing on the Mac listens on a public port.
+
+![Animated flow: browser to Cloudflare, through the tunnel to cloudflared, to nginx on 127.0.0.1:8380, which serves the SPA and proxies /api to FastAPI; the api checks the session in Redis and reads Postgres, and the JSON goes back the same way](docs/diagrams/flows/dashboard-request.svg)
 
 ## 6. Data model
 
@@ -278,6 +354,23 @@ Monitors may target private addresses (e.g. `192.168.x.x`) by design; only the a
 | `check_tls_expiry` | beat, daily 09:00 | default | none |
 | `rollup_and_prune` | beat, daily 03:00 | default | none (idempotent) |
 | `ping_healthcheck` | beat, every 60 s | default | none |
+
+```mermaid
+flowchart LR
+    beat(["beat<br/>(schedule only)"])
+    api(["api"])
+    subgraph redis["redis (broker)"]
+        qd[["queue: default"]]
+        qc[["queue: checks"]]
+    end
+    beat -->|"15 s schedule_due_checks<br/>60 s evaluate_hosts · snapshot_containers<br/>60 s check_network · ping_healthcheck<br/>03:00 rollup_and_prune · 09:00 check_tls_expiry"| qd
+    api -->|"send_alert (agent ingest)"| qd
+    api -->|"run_check (check-now)"| qc
+    qd --> wd["worker-default<br/>prefork × 2"]
+    qc --> wc["worker-checks<br/>threads × 16"]
+    wd -->|"run_check(monitor_id)"| qc
+    wc -->|"send_alert(alert_id)"| qd
+```
 
 Conventions:
 
