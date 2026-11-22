@@ -41,9 +41,11 @@ jobs:
       - name: Install
         run: uv sync --frozen
       - name: Lint
-        run: uv run ruff check . && uv run ruff format --check .
+        run: uv run ruff check . ../agent && uv run ruff format --check . ../agent
       - name: Test (runs the Alembic migrations against PostgreSQL)
         run: uv run pytest -q
+      - name: Test host agent (stdlib only, macOS commands are mocked)
+        run: uv run pytest -q ../agent/tests
       - name: Models and migrations in sync
         env:
           POSTGRES_HOST: localhost

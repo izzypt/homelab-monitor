@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from app import alerts, checks, monitoring
+from app import alerts, checks, hosts, monitoring
 from app.celery_app import celery_app
 from app.config import get_settings
 from app.db import SessionLocal
@@ -113,3 +113,12 @@ def check_tls_expiry() -> int:
             send_alert.delay(alert_id)
         checked += 1
     return checked
+
+
+@celery_app.task(name="app.tasks.monitoring.evaluate_hosts")
+def evaluate_hosts() -> int:
+    with SessionLocal() as db:
+        alert_ids = hosts.mark_stale_hosts(db, monitoring.utcnow())
+    for alert_id in alert_ids:
+        send_alert.delay(alert_id)
+    return len(alert_ids)

@@ -79,7 +79,7 @@ def record_result(db: Session, monitor_id: int, outcome: CheckOutcome, now: date
             incident = _open_incident(db, monitor.id, "down")
             if incident is not None:
                 incident.ended_at = now
-                alert_ids += _create_alert(db, incident.id, "recovered")
+                alert_ids += create_alert(db, "recovered", incident_id=incident.id)
         monitor.state = "UP"
     else:
         monitor.consecutive_failures += 1
@@ -90,7 +90,7 @@ def record_result(db: Session, monitor_id: int, outcome: CheckOutcome, now: date
             )
             db.add(incident)
             db.flush()
-            alert_ids += _create_alert(db, incident.id, "down")
+            alert_ids += create_alert(db, "down", incident_id=incident.id)
 
     db.commit()
     return alert_ids
@@ -117,7 +117,7 @@ def record_tls_expiry(
         )
         db.add(incident)
         db.flush()
-        alert_ids += _create_alert(db, incident.id, "tls_expiring")
+        alert_ids += create_alert(db, "tls_expiring", incident_id=incident.id)
     elif not expiring and incident is not None:
         incident.ended_at = now  # renewed
     db.commit()
@@ -137,12 +137,15 @@ def _open_incident(db: Session, monitor_id: int, kind: str) -> Incident | None:
     )
 
 
-def _create_alert(db: Session, incident_id: int, kind: str) -> list[int]:
-    """Insert an alert unless one already exists for this incident and kind (idempotent)."""
+def create_alert(
+    db: Session, kind: str, *, incident_id: int | None = None, boot_event_id: int | None = None
+) -> list[int]:
+    """Insert an alert unless one already exists for this subject and kind (idempotent)."""
+    constraint = "uq_alerts_incident_kind" if incident_id else "uq_alerts_boot_event_kind"
     alert_id = db.scalar(
         insert(Alert)
-        .values(incident_id=incident_id, kind=kind)
-        .on_conflict_do_nothing(constraint="uq_alerts_incident_kind")
+        .values(incident_id=incident_id, boot_event_id=boot_event_id, kind=kind)
+        .on_conflict_do_nothing(constraint=constraint)
         .returning(Alert.id)
     )
     return [alert_id] if alert_id is not None else []

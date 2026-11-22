@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 
-from app.api import auth, errors, health, incidents, monitors
+from app.api import auth, errors, health, hosts, incidents, monitors
 from app.config import get_settings
 from app.logging import configure_logging
 
@@ -22,4 +22,6 @@ app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(monitors.router, prefix="/api/v1")
 app.include_router(incidents.router, prefix="/api/v1")
+app.include_router(hosts.router, prefix="/api/v1")
+app.include_router(hosts.agent_router, prefix="/api/v1")
 errors.install(app)
