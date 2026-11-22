@@ -1,5 +1,5 @@
 # homelab-monitor stack. See README sections 4 and 11.
-# Nothing here publishes a port yet; the `web` (nginx) service arrives with the frontend.
+# Only `web` (nginx) publishes a port, on 127.0.0.1:${WEB_PORT:-8380}.
 # For local development use: docker compose -f docker-compose.yml -f compose.dev.yml up
 
 x-logging: &logging
@@ -70,6 +70,8 @@ services:
 
   api:
     <<: *app
+    # Reachable by nginx on `frontend`; no published port.
+    networks: [data, egress, frontend]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -104,6 +106,33 @@ services:
       redis:
         condition: service_healthy
     mem_limit: 256m
+
+  web:
+    image: ghcr.io/izzypt/homelab-monitor-web:${IMAGE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    logging: *logging
+    # The single entry point: Cloudflare Tunnel and the host agent use 127.0.0.1 only.
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8380}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 64m
+    networks: [frontend]
 
   docker-proxy:
     # Read-only gate in front of the Docker socket (README section 10): only GET /containers/*
@@ -141,6 +170,8 @@ networks:
   # worker-default <-> docker-proxy only.
   docker:
     internal: true
+  # web (nginx) <-> api. Not internal, because web publishes a port on it.
+  frontend: {}
 
 volumes:
   pgdata: {}

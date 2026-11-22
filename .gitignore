@@ -1,5 +1,6 @@
 # Secrets and local config
 .env
+.deploy-history
 
 # Python
 __pycache__/

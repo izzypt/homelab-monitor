@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 
-from app.api import auth, containers, errors, health, hosts, incidents, monitors
+from app.api import auth, containers, errors, health, hosts, incidents, monitors, summary
 from app.config import get_settings
 from app.logging import configure_logging
 
@@ -15,6 +15,8 @@ app = FastAPI(
     docs_url="/api/docs",
     openapi_url="/api/openapi.json",
     redoc_url=None,
+    # Short operation ids (the function name) give readable names in the generated Angular client.
+    generate_unique_id_function=lambda route: route.name,
 )
 
 # Ops probes live at /api/healthz and /api/readyz; versioned resources go under /api/v1.
@@ -25,4 +27,5 @@ app.include_router(incidents.router, prefix="/api/v1")
 app.include_router(hosts.router, prefix="/api/v1")
 app.include_router(hosts.agent_router, prefix="/api/v1")
 app.include_router(containers.router, prefix="/api/v1")
+app.include_router(summary.router, prefix="/api/v1")
 errors.install(app)

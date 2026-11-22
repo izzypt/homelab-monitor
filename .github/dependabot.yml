@@ -13,6 +13,22 @@ updates:
     schedule:
       interval: weekly
 
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+    groups:
+      angular:
+        patterns: ["@angular/*", "@angular-devkit/*", "typescript", "zone.js"]
+      frontend:
+        patterns: ["*"]
+        exclude-patterns: ["@angular/*", "@angular-devkit/*", "typescript"]
+
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule:
+      interval: weekly
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
