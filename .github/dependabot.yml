@@ -17,6 +17,11 @@ updates:
     directory: /frontend
     schedule:
       interval: weekly
+    ignore:
+      # Angular's build tool pins TypeScript to one minor (@angular/build 22.3 needs >=6.0 <6.1).
+      # Take TypeScript majors with an Angular upgrade (ng update), not on their own.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
     groups:
       angular:
         patterns: ["@angular/*", "@angular-devkit/*", "typescript", "zone.js"]
