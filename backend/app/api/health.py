@@ -40,7 +40,7 @@ def healthz() -> dict[str, str]:
 @router.get("/readyz")
 def readyz(
     response: Response,
-    checks: dict[str, Callable[[], None]] = Depends(get_dependency_checks),  # noqa: B008
+    checks: dict[str, Callable[[], None]] = Depends(get_dependency_checks),
 ) -> dict[str, object]:
     """Postgres and Redis are reachable."""
     results: dict[str, str] = {}

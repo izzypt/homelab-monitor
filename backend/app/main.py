@@ -2,7 +2,7 @@
 
 from fastapi import FastAPI
 
-from app.api import health
+from app.api import auth, health
 from app.config import get_settings
 from app.logging import configure_logging
 
@@ -19,3 +19,4 @@ app = FastAPI(
 
 # Ops probes live at /api/healthz and /api/readyz; versioned resources go under /api/v1.
 app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api/v1")
