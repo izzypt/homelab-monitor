@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import Alert, Incident, Monitor
+from app.models import Alert, BootEvent, Host, Incident, Monitor
 
 log = logging.getLogger(__name__)
 
@@ -19,11 +19,31 @@ class AlertingNotConfigured(Exception):
 
 def compose(db: Session, alert: Alert, settings: Settings) -> EmailMessage:
     incident = db.get(Incident, alert.incident_id) if alert.incident_id else None
+    boot = db.get(BootEvent, alert.boot_event_id) if alert.boot_event_id else None
     monitor = db.get(Monitor, incident.monitor_id) if incident and incident.monitor_id else None
-    name = monitor.name if monitor else "homelab"
+    host_id = (incident.host_id if incident else None) or (boot.host_id if boot else None)
+    host = db.get(Host, host_id) if host_id else None
+    name = monitor.name if monitor else host.name if host else "homelab"
     tz = ZoneInfo(settings.timezone)
 
-    if alert.kind == "down" and incident:
+    if alert.kind == "unexpected_reboot" and boot:
+        subject = f"[REBOOT] {name} restarted unexpectedly"
+        minutes = f"{boot.downtime_s // 60} min" if boot.downtime_s is not None else "unknown"
+        body = (
+            f"{name} came back up at {boot.boot_time.astimezone(tz):%Y-%m-%d %H:%M %Z} "
+            f"after an unexpected shutdown (macOS cause code {boot.shutdown_cause_code}).\n"
+            f"Approximate downtime: {minutes}.\n"
+        )
+    elif alert.kind == "down" and incident and host:
+        subject = f"[DOWN] {name}: no heartbeat"
+        body = (
+            f"The host agent on {name} stopped reporting. {incident.cause}.\n"
+            "If the whole machine is down, the healthchecks.io pings will report it too.\n"
+        )
+    elif alert.kind == "disk_high" and incident:
+        subject = f"[DISK] {name}: {incident.cause}"
+        body = f"{name}: {incident.cause}.\n"
+    elif alert.kind == "down" and incident:
         subject = f"[DOWN] {name}"
         body = (
             f"{name} is DOWN since {incident.started_at.astimezone(tz):%Y-%m-%d %H:%M %Z}.\n"

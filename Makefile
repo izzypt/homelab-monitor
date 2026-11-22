@@ -25,10 +25,10 @@ migrate:  ## Run database migrations
 	$(COMPOSE) run --rm migrate
 
 test:  ## Run backend tests
-	cd backend && uv run pytest -q
+	cd backend && uv run pytest -q . ../agent/tests
 
 lint:  ## Lint and check formatting
-	cd backend && uv run ruff check . && uv run ruff format --check .
+	cd backend && uv run ruff check . ../agent && uv run ruff format --check . ../agent
 
 format:  ## Auto-format backend code
 	cd backend && uv run ruff check --fix . && uv run ruff format .

@@ -1,0 +1,9 @@
+{
+  "api_url": "http://127.0.0.1:8380",
+  "token": "paste-the-token-from-POST-/api/v1/hosts",
+  "interval_s": 30,
+  "healthcheck_url": "",
+  "daemons": ["com.simao.colima", "com.cloudflare"],
+  "state_dir": "/usr/local/var/homelab-agent",
+  "disk_path": "/System/Volumes/Data"
+}

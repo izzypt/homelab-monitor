@@ -36,6 +36,10 @@ celery_app.conf.update(
             "task": "app.tasks.monitoring.schedule_due_checks",
             "schedule": 15.0,
         },
+        "evaluate-hosts": {
+            "task": "app.tasks.monitoring.evaluate_hosts",
+            "schedule": 60.0,
+        },
         "check-tls-expiry": {
             "task": "app.tasks.monitoring.check_tls_expiry",
             "schedule": crontab(hour=9, minute=0),
