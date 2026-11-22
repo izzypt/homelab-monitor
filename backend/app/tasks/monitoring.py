@@ -2,20 +2,25 @@
 
 import logging
 import smtplib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
+import httpx
 from sqlalchemy import select
 
-from app import alerts, checks, hosts, monitoring
+from app import alerts, checks, containers, hosts, maintenance, monitoring
 from app.celery_app import celery_app
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models import Alert, Monitor
+from app.models import Alert, Host, Monitor
 from app.security import get_redis
 
 log = logging.getLogger(__name__)
 
 SCHEDULER_LOCK = "lock:schedule_due_checks"
+NETWORK_OUTAGE_KEY = "network:outage"
+NETWORK_FAILURES_KEY = "network:failures"
+NETWORK_FAILURE_THRESHOLD = 2
 
 
 @celery_app.task(name="app.tasks.monitoring.schedule_due_checks")
@@ -46,8 +51,11 @@ def run_check(monitor_id: int) -> None:
             monitor.timeout_s,
         )
     outcome = checks.run(kind, target, config, timeout)  # no DB connection held during I/O
+    suppress = bool(get_redis().exists(NETWORK_OUTAGE_KEY))
     with SessionLocal() as db:
-        alert_ids = monitoring.record_result(db, monitor_id, outcome, monitoring.utcnow())
+        alert_ids = monitoring.record_result(
+            db, monitor_id, outcome, monitoring.utcnow(), suppress_alerts=suppress
+        )
     for alert_id in alert_ids:
         send_alert.delay(alert_id)
 
@@ -122,3 +130,71 @@ def evaluate_hosts() -> int:
     for alert_id in alert_ids:
         send_alert.delay(alert_id)
     return len(alert_ids)
+
+
+def _docker_host(db) -> Host | None:
+    return db.scalar(select(Host).where(Host.name == get_settings().docker_host_name))
+
+
+@celery_app.task(name="app.tasks.monitoring.snapshot_containers")
+def snapshot_containers() -> int:
+    settings = get_settings()
+    try:
+        infos = containers.parse_containers(containers.fetch_containers(settings.docker_api_url))
+    except httpx.HTTPError as exc:
+        log.warning("docker API unavailable: %s", exc)
+        return 0
+    with SessionLocal() as db:
+        host = _docker_host(db)
+        if host is None:
+            log.warning(
+                "no host named %r: register it to record containers", settings.docker_host_name
+            )
+            return 0
+        return containers.apply_snapshot(db, host, infos, monitoring.utcnow())
+
+
+@celery_app.task(name="app.tasks.monitoring.check_network")
+def check_network() -> str:
+    """Control check: the network is down only if every control target fails, twice in a row."""
+    settings = get_settings()
+    redis = get_redis()
+    outcomes = [checks.check_http(url, {}, 5) for url in settings.network_control_url_list]
+    network_ok = not outcomes or any(o.ok for o in outcomes)
+    alert_ids: list[int] = []
+    with SessionLocal() as db:
+        host = _docker_host(db)
+        if network_ok:
+            redis.delete(NETWORK_FAILURES_KEY)
+            if redis.delete(NETWORK_OUTAGE_KEY) and host is not None:
+                alert_ids = monitoring.close_network_outage(db, host.id, monitoring.utcnow())
+        else:
+            failures = redis.incr(NETWORK_FAILURES_KEY)
+            redis.expire(NETWORK_FAILURES_KEY, 300)
+            if failures >= NETWORK_FAILURE_THRESHOLD:
+                redis.set(NETWORK_OUTAGE_KEY, "1", ex=300)  # refreshed every minute while down
+                if host is not None:
+                    cause = "; ".join(
+                        f"{u}: {o.error}"
+                        for u, o in zip(settings.network_control_url_list, outcomes, strict=True)
+                    )
+                    alert_ids = monitoring.open_network_outage(
+                        db, host.id, monitoring.utcnow(), cause
+                    )
+    for alert_id in alert_ids:
+        send_alert.delay(alert_id)
+    return "ok" if network_ok else "down"
+
+
+@celery_app.task(name="app.tasks.monitoring.rollup_and_prune")
+def rollup_and_prune() -> dict[str, int]:
+    settings = get_settings()
+    now = monitoring.utcnow()
+    yesterday = now.astimezone(ZoneInfo(settings.timezone)).date() - timedelta(days=1)
+    with SessionLocal() as db:
+        rows = maintenance.rollup_day(db, yesterday, settings.timezone)
+        deleted = maintenance.prune(
+            db, now, settings.raw_retention_days, settings.summary_retention_days
+        )
+    log.info("rollup %s: %d rows; pruned %s", yesterday, rows, deleted)
+    return {"rollup_rows": rows, **deleted}

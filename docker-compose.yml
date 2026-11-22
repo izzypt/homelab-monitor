@@ -95,6 +95,8 @@ services:
 
   worker-default:
     <<: *app
+    # The only service that can reach the Docker socket proxy (container snapshots).
+    networks: [data, egress, docker]
     command: ["celery", "-A", "app.celery_app", "worker", "-Q", "default", "-P", "prefork", "-c", "2", "-n", "default@%h", "--loglevel", "INFO"]
     depends_on:
       migrate:
@@ -102,6 +104,22 @@ services:
       redis:
         condition: service_healthy
     mem_limit: 256m
+
+  docker-proxy:
+    # Read-only gate in front of the Docker socket (README section 10): only GET /containers/*
+    # (plus ping/version/events, read-only) is allowed. No POST, exec, images or volumes.
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      CONTAINERS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 32m
+    networks: [docker]
 
   beat:
     <<: *app
@@ -120,6 +138,9 @@ networks:
     internal: true
   # Outbound access for checks, SMTP and healthchecks.io pings.
   egress: {}
+  # worker-default <-> docker-proxy only.
+  docker:
+    internal: true
 
 volumes:
   pgdata: {}

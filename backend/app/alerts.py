@@ -40,6 +40,13 @@ def compose(db: Session, alert: Alert, settings: Settings) -> EmailMessage:
             f"The host agent on {name} stopped reporting. {incident.cause}.\n"
             "If the whole machine is down, the healthchecks.io pings will report it too.\n"
         )
+    elif alert.kind == "network_outage" and incident:
+        subject = f"[NETWORK] {name}: local network or internet outage"
+        body = (
+            f"Every control check failed from {name}, so this looks like a home network or ISP "
+            "outage rather than individual services. Monitor DOWN emails are paused until it "
+            f"recovers.\nDetails: {incident.cause}\n"
+        )
     elif alert.kind == "disk_high" and incident:
         subject = f"[DISK] {name}: {incident.cause}"
         body = f"{name}: {incident.cause}.\n"
