@@ -56,3 +56,23 @@ def redis_client():
     client.flushdb()
     yield client
     client.flushdb()
+
+
+@pytest.fixture
+def auth_client(db, redis_client):
+    """A logged-in TestClient that sends the CSRF header on every request."""
+    from fastapi.testclient import TestClient
+
+    from app import cli
+    from app.api.deps import CSRF_COOKIE, CSRF_HEADER
+    from app.main import app
+
+    cli.create_admin("admin@example.com", "correct horse battery")
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@example.com", "password": "correct horse battery"},
+    )
+    assert response.status_code == 200
+    client.headers[CSRF_HEADER] = client.cookies[CSRF_COOKIE]
+    return client
