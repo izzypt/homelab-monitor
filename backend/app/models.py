@@ -42,6 +42,7 @@ ALERT_KINDS = (
     "network_outage",
 )
 ALERT_STATUSES = ("pending", "sent", "failed")
+INCIDENT_KINDS = ("down", "tls_expiring", "stale", "disk_high", "network_outage")
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -170,6 +171,7 @@ class Incident(Base):
     __tablename__ = "incidents"
     __table_args__ = (
         CheckConstraint("num_nonnulls(monitor_id, host_id) = 1", name="one_subject"),
+        CheckConstraint(_in("kind", INCIDENT_KINDS), name="kind"),
         Index("ix_incidents_open", "started_at", postgresql_where=text("ended_at IS NULL")),
     )
 
@@ -180,6 +182,7 @@ class Incident(Base):
     host_id: Mapped[int | None] = mapped_column(
         ForeignKey("hosts.id", ondelete="CASCADE"), index=True
     )
+    kind: Mapped[str] = mapped_column(String(32), server_default="down")
     started_at: Mapped[datetime] = _ts(default_now=True)
     ended_at: Mapped[datetime | None] = _ts(nullable=True)
     cause: Mapped[str | None] = mapped_column(Text)

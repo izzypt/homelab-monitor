@@ -9,7 +9,7 @@ A self-hosted monitor for a single-machine homelab (a headless Mac mini). It ans
 
 Built with **FastAPI**, **Celery**, **Redis**, **PostgreSQL** and an **Angular** (Angular Material) frontend, run with Docker Compose on Colima, and published through an existing Cloudflare Tunnel.
 
-> **Status:** in development. Foundation in place (compose stack, FastAPI skeleton, Celery, Alembic, CI); features land in follow-up PRs. The sections below are the system design document.
+> **Status:** in development. Done: compose stack, data model, login, URL monitors (http/dns/tcp), scheduler, incidents, email alerts, TLS expiry. Next: host agent, containers, Angular frontend. The sections below are the system design document.
 
 ## Getting started
 
