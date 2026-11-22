@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # One image for api, worker-checks, worker-default, beat and migrate.
 
-FROM python:3.13-slim AS base
+FROM python:3.15-slim AS base
 COPY --from=ghcr.io/astral-sh/uv:0.11.32 /uv /usr/local/bin/uv
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
