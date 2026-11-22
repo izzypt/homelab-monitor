@@ -1,6 +1,8 @@
 # homelab-monitor
 
-A self-hosted monitor for a single-machine homelab (a headless Mac mini). It answers four questions at a glance:
+> **Abstract.** homelab-monitor is a small self-hosted web app that watches a single headless Mac mini and the services it hosts. A native macOS agent reports boot time, uptime, the cause of the last shutdown, disk and memory; Celery workers check a list of URLs (HTTP, DNS, TCP and TLS expiry) and record which Docker containers are running. Results land in PostgreSQL and are shown on an Angular dashboard behind a login, and email alerts go out when a URL goes down, the host goes quiet, it comes back from an unexpected shutdown, or the disk fills up. Two external healthchecks.io pings cover the one case the app cannot see by itself: the whole Mac going down.
+
+It answers four questions at a glance:
 
 - **Is the host up**, and since when?
 - **When did it last shut down or reboot**, and was that clean or a crash/power cut?
@@ -9,29 +11,233 @@ A self-hosted monitor for a single-machine homelab (a headless Mac mini). It ans
 
 Built with **FastAPI**, **Celery**, **Redis**, **PostgreSQL** and an **Angular** (Angular Material) frontend, run with Docker Compose on Colima, and published through an existing Cloudflare Tunnel.
 
-> **Status:** in development. Done: compose stack, data model, login, URL monitors (http/dns/tcp), scheduler, incidents, email alerts, TLS expiry, macOS host agent ([agent/README.md](agent/README.md)), containers via a read-only Docker proxy, local network outage grouping, daily rollups and retention pruning, Angular dashboard behind nginx, GHCR image builds and `make deploy`. The sections below are the system design document.
+> **Status:** in development. Done: compose stack, data model, login, URL monitors (http/dns/tcp), scheduler, incidents, email alerts, TLS expiry, macOS host agent ([agent/README.md](agent/README.md)), containers via a read-only Docker proxy, local network outage grouping, daily rollups and retention pruning, Angular dashboard behind nginx, GHCR image builds and `make deploy`. Sections 1 to 12 below are the system design document.
 
 ## Getting started
 
-Requirements: Docker with Compose (Colima on the Mac mini). For local development also [uv](https://docs.astral.sh/uv/) (backend) and Node.js 24 (frontend).
+- [Set up the Mac mini from scratch](#set-up-the-mac-mini-from-scratch): every step to rebuild the production host.
+- [Update, roll back and day-to-day operations](#update-roll-back-and-day-to-day-operations)
+- [Develop locally](#develop-locally)
 
-### Run it on the Mac mini
+### Set up the Mac mini from scratch
 
-```bash
-cp .env.example .env      # then set POSTGRES_PASSWORD, REDIS_PASSWORD and the rest
-make deploy TAG=<git-sha> # pull the CI images for that commit, migrate, start everything
-make ps                   # check service health
-```
+The target is the setup described in §3 and §11: an Apple Silicon Mac mini (here an M5 Pro on macOS 27.2), headless and reached over SSH, with FileVault on. Docker runs in a Colima VM started at boot by a LaunchDaemon (Docker Desktop is not used). The only port the stack publishes is nginx on `127.0.0.1:8380` (8080 is already taken on this Mac), and the existing Cloudflare Tunnel (`cloudflared`, LaunchDaemon `com.cloudflare`, not part of the compose file) publishes it to the internet.
 
-The dashboard is then on <http://127.0.0.1:8380> (`WEB_PORT`); point the Cloudflare Tunnel at that address. Image SHAs are on the repository's Packages page, or use `TAG=main` for the latest build. If the GHCR packages are private, run `docker login ghcr.io` once with a token that has `read:packages`, or make both packages public in their settings.
+Commands marked `sudo` need an admin account. Everything else runs as **your own login user** (written `<you>` below), which owns Homebrew, Colima and the checkout. Secrets and alert email addresses go only in `.env` and `/usr/local/etc/homelab-agent.json`, never in the repository.
 
-Create the admin account (there is no signup page), then register the host and install the agent ([agent/README.md](agent/README.md)):
+#### 1. macOS: remote access, power and FileVault
 
 ```bash
-docker compose run --rm api python -m app.cli create-admin --email you@example.com
+sudo systemsetup -setremotelogin on                 # SSH (System Settings > General > Sharing > Remote Login)
+sudo pmset -a sleep 0 disksleep 0 autorestart 1     # never sleep; power back on after a power cut
+pmset -g | grep -E 'sleep|autorestart'              # check
+fdesetup status                                     # "FileVault is On."
 ```
 
-Register the host on the dashboard's **Hosts** page with the name in `DOCKER_HOST_NAME` (default `mac-mini`), so containers are recorded under it.
+FileVault means nothing starts after a boot until the disk is unlocked:
+
+- **Planned reboot:** `sudo fdesetup authrestart` unlocks the next boot for you, so the Mac comes back on its own.
+- **After a power cut:** SSH to the Mac **from the local network** and log in with a FileVault-enabled account to unlock the disk (macOS 26 and later, with Remote Login on). Until then the tunnel is down too, so this cannot be done from outside the home network.
+
+#### 2. Command line tools
+
+```bash
+xcode-select --install          # git and make
+# Homebrew, from https://brew.sh, then:
+brew install colima docker docker-compose python@3
+```
+
+Tell the Docker CLI where Homebrew's Compose plugin is, so `docker compose` works. Add this to `~/.docker/config.json` (create the file if it doesn't exist):
+
+```json
+{ "cliPluginsExtraDirs": ["/opt/homebrew/lib/docker/cli-plugins"] }
+```
+
+If Docker Desktop was ever installed, quit it and turn off "Start Docker Desktop when you sign in", so it doesn't compete for the `docker` CLI context.
+
+#### 3. Colima, started at boot by a LaunchDaemon
+
+Create the VM once, by hand, with the resources you want (Apple's Virtualization framework, arm64):
+
+```bash
+colima start --vm-type vz --arch aarch64 --cpu 4 --memory 8 --disk 60
+docker context use colima
+docker info --format '{{.OSType}}/{{.Architecture}}'   # linux/aarch64
+colima stop
+```
+
+A LaunchAgent would only start after someone logs in to the GUI, which never happens on a headless FileVault Mac, so Colima is started by a **LaunchDaemon** that runs as `<you>`. Save this as `/Library/LaunchDaemons/com.simao.colima.plist`, replacing `<you>` in the three places it appears. The label matters: the host agent reports this exact name as running or not.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.simao.colima</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/colima</string>
+    <string>start</string>
+    <string>--foreground</string>
+  </array>
+  <key>UserName</key>
+  <string><you></string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/<you></string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/<you>/.colima/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/<you>/.colima/launchd.log</string>
+</dict>
+</plist>
+```
+
+```bash
+sudo chown root:wheel /Library/LaunchDaemons/com.simao.colima.plist
+sudo chmod 644 /Library/LaunchDaemons/com.simao.colima.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.simao.colima.plist
+sudo launchctl print system/com.simao.colima | grep -E 'state|pid'
+colima status && docker ps
+```
+
+To stop or restart Colima, go through launchd (`sudo launchctl kickstart -k system/com.simao.colima`), not `colima stop`, so there is only one owner of the VM. Containers come back on their own after a Colima restart because every service has `restart: unless-stopped`, and the Postgres data survives in the `pgdata` volume inside the VM (§11).
+
+#### 4. Get the code and fill in `.env`
+
+The repository and the GHCR images are public, so no token or `docker login` is needed.
+
+```bash
+cd ~ && git clone https://github.com/izzypt/homelab-monitor.git
+cd homelab-monitor
+cp .env.example .env && chmod 600 .env
+```
+
+Edit `.env`. Every variable is documented in [.env.example](.env.example); the ones to set for production are:
+
+| Variable | What to put there |
+|----------|-------------------|
+| `POSTGRES_PASSWORD`, `REDIS_PASSWORD` | Long random values, e.g. `openssl rand -hex 32`. Required: compose refuses to start without them. |
+| `WEB_PORT` | Leave at `8380`. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_STARTTLS`, `ALERT_FROM` | The outgoing mail account. While `SMTP_HOST` is empty, alerts are recorded but marked failed. |
+| `ALERT_RECIPIENTS` | Comma-separated addresses that receive alerts. Only here, never in the repository. |
+| `HEALTHCHECK_PING_URL` | The `homelab-monitor` ping URL from step 8. Can stay empty until then. |
+| `DOCKER_HOST_NAME` | The host name you register in step 6 (default `mac-mini`). |
+
+`IMAGE_TAG` can stay as it is: `make deploy` sets it on each run.
+
+#### 5. Deploy the stack
+
+Pick a commit on `main` whose CI run has finished (the images are tagged with the full git SHA; `TAG=main` is the latest build):
+
+```bash
+git pull
+make deploy TAG=$(git rev-parse HEAD)   # pull images, run migrations, start everything, wait for healthy
+make ps                                  # every service "healthy" or "running", migrate "exited (0)"
+curl -s http://127.0.0.1:8380/api/readyz # Postgres and Redis reachable
+```
+
+Each deploy appends the tag to `.deploy-history`, which `make rollback` uses later.
+
+#### 6. Create the admin and register the host
+
+There is no signup page. Create the single admin account (the password is prompted for, at least 12 characters; running it again resets the password):
+
+```bash
+docker compose exec api python -m app.cli create-admin --email <admin-login-email>
+```
+
+Open the dashboard. Before the tunnel is set up (step 9) use an SSH port forward from your laptop and Chrome or Firefox (they accept the `Secure` session cookie on `http://localhost`):
+
+```bash
+ssh -L 8380:127.0.0.1:8380 <you>@<mac-mini>   # then open http://localhost:8380
+```
+
+Log in, go to **Hosts > Register a host**, and register `mac-mini` (the same name as `DOCKER_HOST_NAME`, so containers are recorded under it). The dialog shows the **agent token once**: copy it for step 7. If it's lost, use **Rotate token** on the host's page.
+
+#### 7. Install the host agent
+
+The agent is a stdlib-only Python script that runs natively on macOS as a LaunchDaemon (`com.homelab.agent`) under a dedicated non-admin user. Full details are in [agent/README.md](agent/README.md). Create the user once (any name; `homelabagent` here):
+
+```bash
+sudo sysadminctl -addUser homelabagent -fullName "homelab agent" -password -   # prompts for a password
+sudo dscl . -create /Users/homelabagent IsHidden 1                              # hide it from the login window
+```
+
+Then run the installer twice. The first run creates the config and stops:
+
+```bash
+sudo ./agent/install.sh --user homelabagent --python /opt/homebrew/bin/python3
+sudo nano /usr/local/etc/homelab-agent.json   # "token": the token from step 6; "healthcheck_url": the mac-mini ping URL from step 8
+sudo ./agent/install.sh --user homelabagent --python /opt/homebrew/bin/python3
+tail -f /usr/local/var/log/homelab-agent.log
+```
+
+Keep `api_url` at `http://127.0.0.1:8380` and `daemons` at `["com.simao.colima", "com.cloudflare"]`. Within 30 s the host shows as up on the dashboard, with its boot time, last shutdown cause and both daemons.
+
+#### 8. healthchecks.io dead man's switches
+
+The app cannot alert you when the Mac itself is down, so two external checks do (§5.7). In a [healthchecks.io](https://healthchecks.io) project, with email notifications set up on the account:
+
+| Check | Period | Grace | Ping URL goes in |
+|-------|--------|-------|------------------|
+| `mac-mini` | 1 minute | 5 minutes | `healthcheck_url` in `/usr/local/etc/homelab-agent.json` (pinged by the agent every 30 s) |
+| `homelab-monitor` | 1 minute | 5 minutes | `HEALTHCHECK_PING_URL` in `.env` (pinged by beat every minute) |
+
+After editing them, apply the changes:
+
+```bash
+sudo ./agent/install.sh --user homelabagent --python /opt/homebrew/bin/python3   # restarts the agent with the new config
+make deploy TAG=<current-sha>                                                     # recreates the containers with the new .env (see .deploy-history)
+```
+
+Both checks turn green within a couple of minutes. If only `homelab-monitor` goes quiet, Colima or the app is down; if both do, the Mac is down or offline.
+
+#### 9. Publish through the Cloudflare Tunnel
+
+`cloudflared` already runs on macOS as the LaunchDaemon `com.cloudflare`; it is deliberately not part of the compose file. Point the public hostname at nginx:
+
+- **Tunnel managed in the Cloudflare dashboard** (installed with `cloudflared service install <token>`): Zero Trust > Networks > Tunnels > your tunnel > Public hostname: add `<public-hostname>` with service `HTTP` and URL `127.0.0.1:8380`.
+- **Tunnel managed by a local config file**: add an ingress rule above the catch-all, then restart the daemon with `sudo launchctl kickstart -k system/com.cloudflare`:
+  ```yaml
+  ingress:
+    - hostname: <public-hostname>
+      service: http://127.0.0.1:8380
+    - service: http_status:404
+  ```
+
+Open `https://<public-hostname>` and log in. Then add the first monitor on the **Monitors** page, for example an `http` monitor on the public URL itself, so a broken tunnel shows up as an incident.
+
+#### 10. Check the whole chain
+
+- `make ps`: all services healthy.
+- Dashboard **Overview**: host up, monitors green, containers listed under `mac-mini`.
+- healthchecks.io: both checks green.
+- Reboot test: `sudo fdesetup authrestart`. The Mac comes back, Colima and the agent start on their own, and the host page records a new boot with a clean shutdown cause.
+
+### Update, roll back and day-to-day operations
+
+```bash
+ssh <you>@<mac-mini> && cd ~/homelab-monitor
+git pull                                   # compose file, nginx config and agent may have changed
+make deploy TAG=$(git rev-parse HEAD)      # once CI has pushed the images for this commit
+sudo ./agent/install.sh --user homelabagent --python /opt/homebrew/bin/python3   # only if agent/ changed
+
+make rollback TAG=<previous-sha>           # if something goes wrong; earlier tags are in .deploy-history
+make logs                                  # follow all service logs
+make ps                                    # service health
+```
+
+Migrations are forward-only, so a rollback keeps the newer schema (§11). `make down` stops the stack and keeps the data; `docker compose down -v` **deletes the database volume**, and there are no backups.
+
+Useful launchd commands: `sudo launchctl print system/<label>` for status, `sudo launchctl kickstart -k system/<label>` to restart, `sudo launchctl bootout system/<label>` to stop, with `<label>` one of `com.simao.colima`, `com.homelab.agent` or `com.cloudflare`.
 
 ### Develop locally
 
@@ -455,6 +661,8 @@ cd homelab-monitor
 make deploy TAG=<git-sha>     # compose pull + migrate + up -d --wait
 make rollback TAG=<prev-sha>  # same command, previous tag (see .deploy-history)
 ```
+
+The full first-time setup of the Mac is in [Set up the Mac mini from scratch](#set-up-the-mac-mini-from-scratch).
 
 Migrations are forward-only, so a rollback keeps the newer schema; keep migrations additive so the previous image still runs against it.
 
